@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<odoo>
+   <record id="view_delete_data_wizard" model="ir.ui.view">
+      <field name="name">Delete Data</field>
+      <field name="model">delete.data</field>
+      <field name="arch" type="xml">
+         <form string="Remove Data">
+            <group>
+               <field name="sale_transfer"/>
+               <field name="purchase_transfer"/>
+               <field name="only_transfers"/>
+               <field name="invoicing_payments_journal_entries"/>
+               <field name="only_journal_entries"/>
+               <field name="customers_vendors"/>
+               <field name="accounts_ccounting"/>
+               <field name="all_data"/>
+            </group>
+            <footer>
+               <button name="save_data" string="Remove Data" type="object" class="oe_highlight" />
+               <button string="Cancel" class="btn-secondary" special="cancel" />
+            </footer>
+         </form>
+      </field>
+   </record>
+
+   <record model="ir.actions.act_window" id="delete_data_wizard">
+      <field name="name">Remove Data</field>
+      <field name="type">ir.actions.act_window</field>
+      <field name="res_model">delete.data</field>
+      <field name="view_mode">form</field>
+      <field name="view_id" ref="view_delete_data_wizard" />
+      <field name="target">new</field>
+   </record>
+
+   
+   <menuitem id="delete_data_menu_root" name="Remove Data" parent="base.menu_administration" groups="base.group_no_one"/>
+   <menuitem id="delete_data_menu" name="Remove Data" action="delete_data_wizard" parent="clean_data_app.delete_data_menu_root" sequence="105"/>
+
+</odoo>
