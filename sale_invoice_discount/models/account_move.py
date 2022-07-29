@@ -196,14 +196,14 @@ class AccountMove(models.Model):
             move.with_context(check_move_validity=False)._onchange_invoice_line_ids()
         return moves
 
-    def _recompute_tax_lines(self, recompute_tax_base_amount=False):
+    def _recompute_tax_lines(self, recompute_tax_base_amount=False, tax_rep_lines_to_recompute=None):
         vals = {}
         for line in self.invoice_line_ids.filtered("discount_amount"):
             vals[line] = {"price_unit": line.price_unit}
             price_unit = line.price_unit - line.discount_amount
             line.update({"price_unit": price_unit})
         res = super(AccountMove, self)._recompute_tax_lines(
-            recompute_tax_base_amount=recompute_tax_base_amount
+            recompute_tax_base_amount=recompute_tax_base_amount, tax_rep_lines_to_recompute=tax_rep_lines_to_recompute
         )
         for line in vals.keys():
             line.update(vals[line])
