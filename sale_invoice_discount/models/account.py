@@ -284,7 +284,7 @@ class AccountInvoice(models.Model):
     #             raise UserError(_('You cannot create a move already in the posted state. Please create a draft move and post it after.'))
     #         # vals_list = self._move_autocomplete_invoice_lines_create(vals_list)
     #     return
-    def _recompute_tax_lines(self, recompute_tax_base_amount=False):
+    def _recompute_tax_lines(self, recompute_tax_base_amount=False, tax_rep_lines_to_recompute=None):
         ''' Compute the dynamic tax lines of the journal entry.
 
         :param lines_map: The line_ids dispatched by type containing:
@@ -325,9 +325,9 @@ class AccountInvoice(models.Model):
                 quantity = 1.0
                 tax_type = base_line.tax_ids[0].type_tax_use if base_line.tax_ids else None
                 is_refund = (tax_type == 'sale' and base_line.debit) or (tax_type == 'purchase' and base_line.credit)
-                price_unit_wo_discount = base_line.balance
+                price_unit_wo_discount = base_line.amount_currency
 
-            balance_taxes_res = base_line.tax_ids._origin.compute_all(
+            balance_taxes_res = base_line.tax_ids._origin.with_context(force_sign=move._get_tax_force_sign()).compute_all(
                 price_unit_wo_discount,
                 currency=base_line.currency_id,
                 quantity=quantity,
@@ -339,14 +339,12 @@ class AccountInvoice(models.Model):
 
             if move.move_type == 'entry':
                 repartition_field = is_refund and 'refund_repartition_line_ids' or 'invoice_repartition_line_ids'
-                repartition_tags = base_line.tax_ids.mapped(repartition_field).filtered(
-                    lambda x: x.repartition_type == 'base').tag_ids
-                tags_need_inversion = (tax_type == 'sale' and not is_refund) or (tax_type == 'purchase' and is_refund)
+                repartition_tags = base_line.tax_ids.flatten_taxes_hierarchy().mapped(repartition_field).filtered(lambda x: x.repartition_type == 'base').tag_ids
+                tags_need_inversion = self._tax_tags_need_inversion(move, is_refund, tax_type)
                 if tags_need_inversion:
                     balance_taxes_res['base_tags'] = base_line._revert_signed_tags(repartition_tags).ids
                     for tax_res in balance_taxes_res['taxes']:
-                        tax_res['tag_ids'] = base_line._revert_signed_tags(
-                            self.env['account.account.tag'].browse(tax_res['tag_ids'])).ids
+                        tax_res['tag_ids'] = base_line._revert_signed_tags(self.env['account.account.tag'].browse(tax_res['tag_ids'])).ids
 
             return balance_taxes_res
 
@@ -368,19 +366,22 @@ class AccountInvoice(models.Model):
                     'tax_base_amount': 0.0,
                     'grouping_dict': False,
                 }
-        self.line_ids -= to_remove
+        if not recompute_tax_base_amount:
+            self.line_ids -= to_remove
 
         # ==== Mount base lines ====
         for line in self.line_ids.filtered(lambda line: not line.tax_repartition_line_id):
             # Don't call compute_all if there is no tax.
             if not line.tax_ids:
-                line.tax_tag_ids = [(5, 0, 0)]
+                if not recompute_tax_base_amount:
+                    line.tax_tag_ids = [(5, 0, 0)]
                 continue
 
             compute_all_vals = _compute_base_line_taxes(line)
 
             # Assign tags on base line
-            line.tax_tag_ids = compute_all_vals['base_tags']
+            if not recompute_tax_base_amount:
+                line.tax_tag_ids = compute_all_vals['base_tags'] or [(5, 0, 0)]
 
             tax_exigible = True
             for tax_vals in compute_all_vals['taxes']:
@@ -401,23 +402,27 @@ class AccountInvoice(models.Model):
                     'grouping_dict': False,
                 })
                 taxes_map_entry['amount'] += tax_vals['amount']
-                taxes_map_entry['tax_base_amount'] += self._get_base_amount_to_display(tax_vals['base'],
-                                                                                       tax_repartition_line)
+                taxes_map_entry['tax_base_amount'] += self._get_base_amount_to_display(tax_vals['base'], tax_repartition_line, tax_vals['group'])
                 taxes_map_entry['grouping_dict'] = grouping_dict
-            line.tax_exigible = tax_exigible
+            if not recompute_tax_base_amount:
+                line.tax_exigible = tax_exigible
+
+        # ==== Pre-process taxes_map ====
+        taxes_map = self._preprocess_taxes_map(taxes_map)
 
         # ==== Process taxes_map ====
         for taxes_map_entry in taxes_map.values():
             # The tax line is no longer used in any base lines, drop it.
             if taxes_map_entry['tax_line'] and not taxes_map_entry['grouping_dict']:
-                self.line_ids -= taxes_map_entry['tax_line']
+                if not recompute_tax_base_amount:
+                    self.line_ids -= taxes_map_entry['tax_line']
                 continue
 
             currency = self.env['res.currency'].browse(taxes_map_entry['grouping_dict']['currency_id'])
 
             # Don't create tax lines with zero balance.
             if currency.is_zero(taxes_map_entry['amount']):
-                if taxes_map_entry['tax_line']:
+                if taxes_map_entry['tax_line'] and not recompute_tax_base_amount:
                     self.line_ids -= taxes_map_entry['tax_line']
                 continue
 
@@ -446,20 +451,26 @@ class AccountInvoice(models.Model):
 
             if taxes_map_entry['tax_line']:
                 # Update an existing tax line.
+                if tax_rep_lines_to_recompute and taxes_map_entry['tax_line'].tax_repartition_line_id not in tax_rep_lines_to_recompute:
+                    continue
                 taxes_map_entry['tax_line'].update(to_write_on_line)
             else:
                 create_method = in_draft_mode and self.env['account.move.line'].new or self.env[
                     'account.move.line'].create
                 tax_repartition_line_id = taxes_map_entry['grouping_dict']['tax_repartition_line_id']
                 tax_repartition_line = self.env['account.tax.repartition.line'].browse(tax_repartition_line_id)
+
+                if tax_rep_lines_to_recompute and tax_repartition_line not in tax_rep_lines_to_recompute:
+                    continue
+
                 tax = tax_repartition_line.invoice_tax_id or tax_repartition_line.refund_tax_id
                 taxes_map_entry['tax_line'] = create_method({
                     **to_write_on_line,
                     'name': tax.name,
                     'move_id': self.id,
                     'partner_id': line.partner_id.id,
-                    'company_id': line.company_id.id,
-                    'company_currency_id': line.company_currency_id.id,
+                    'company_id': self.company_id.id,
+                    'company_currency_id': self.company_currency_id.id,
                     'tax_base_amount': tax_base_amount,
                     'exclude_from_invoice_tab': True,
                     'tax_exigible': tax.tax_exigibility == 'on_invoice',
